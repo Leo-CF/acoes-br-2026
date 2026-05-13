@@ -220,6 +220,7 @@ class App:
         self._ai_move      = None
         self._ai_thinking  = False
         self._ai_gen       = 0      # increments on new game; prevents stale moves
+        self._history      = []     # list of SAN strings, one per half-move
 
     # ── main loop ─────────────────────────────────────────────────────────
     def run(self):
@@ -274,8 +275,9 @@ class App:
                 if click:
                     for pt, rect in self._promo_rects().items():
                         if rect.collidepoint(mouse):
-                            self.board.push(chess.Move(self._promo_from, self.promoting,
-                                                       promotion=pt))
+                            move = chess.Move(self._promo_from, self.promoting, promotion=pt)
+                            self._history.append(self.board.san(move))
+                            self.board.push(move)
                             self.promoting = self._promo_from = None
                             self._status = self._get_status()
                             break
@@ -299,12 +301,13 @@ class App:
     def _new_game(self):
         self._ai_gen += 1
         self.board.reset()
-        self.sel_sq = self.valid_sqs = None
+        self.sel_sq      = None
         self.valid_sqs   = []
         self.promoting   = self._promo_from = None
         self._status     = "playing"
         self._ai_move    = None
         self._ai_thinking = False
+        self._history    = []
         self.state       = "game"
 
     def _board_click(self, mouse):
@@ -352,6 +355,7 @@ class App:
             self._apply_move(chess.Move(from_sq, to_sq))
 
     def _apply_move(self, move):
+        self._history.append(self.board.san(move))  # SAN must be read before push
         self.board.push(move)
         self.sel_sq    = None
         self.valid_sqs = []
@@ -373,10 +377,13 @@ class App:
                 return
             self.board.pop()
             self.board.pop()
+            for _ in range(2):
+                if self._history: self._history.pop()
         else:
             if not self.board.move_stack:
                 return
             self.board.pop()
+            if self._history: self._history.pop()
         self.sel_sq    = None
         self.valid_sqs = []
         self.promoting = self._promo_from = None
@@ -581,6 +588,8 @@ class App:
             ts = self.uf.render(f"CPU pensando{dots}", True, C["gold"])
             self.screen.blit(ts, ts.get_rect(center=(cx, y_st + 22)))
 
+        self._draw_history()
+
         min_moves = 2 if self.mode == "cpu" else 1
         can_undo = len(self.board.move_stack) >= min_moves and not self._ai_thinking
         self._btn(self._r("undo"),     "< Desfazer", mouse,
@@ -588,6 +597,58 @@ class App:
                   C["neu_hov"] if can_undo else (20, 22, 28))
         self._btn(self._r("new"),      "Reiniciar",  mouse, C["neu"], C["neu_hov"])
         self._btn(self._r("menu_btn"), "< Menu",     mouse, C["neu"], C["neu_hov"])
+
+    def _draw_history(self):
+        box = pygame.Rect(SBX + 8, BY + 116, SBW - 16, BY + SQ * 8 - 148 - 116)
+        # box bottom = BY+SQ*8 - 148 = 380  (8px above first button at 388)
+
+        pygame.draw.rect(self.screen, (18, 22, 30), box, border_radius=6)
+
+        cx  = box.centerx
+        lf  = self.lf
+        hdr = lf.render("Historico", True, C["hint"])
+        self.screen.blit(hdr, hdr.get_rect(center=(cx, box.top + 10)))
+
+        # thin separator
+        pygame.draw.line(self.screen, (40, 46, 56),
+                         (box.left + 6, box.top + 20),
+                         (box.right - 6, box.top + 20))
+
+        line_h   = 14
+        area_top = box.top + 26
+        area_h   = box.height - 28
+        max_rows = area_h // line_h
+
+        # Group half-moves into (move_num, white_san, black_san) rows
+        h = self._history
+        pairs = [(i // 2 + 1, h[i], h[i + 1] if i + 1 < len(h) else "")
+                 for i in range(0, len(h), 2)]
+
+        visible   = pairs[-max_rows:]
+        last_idx  = len(pairs) - 1   # index of the last full row
+
+        # "..." indicator if history is scrolled
+        start_idx = len(pairs) - len(visible)
+        if start_idx > 0:
+            dot_s = lf.render("...", True, C["hint"])
+            self.screen.blit(dot_s, (box.left + 6, area_top))
+            area_top += line_h
+
+        x_num   = box.left + 4
+        x_white = box.left + 26
+        x_black = box.left + 88
+
+        for row_i, (num, wh, bl) in enumerate(visible):
+            is_last = (start_idx + row_i == last_idx)
+            y = area_top + row_i * line_h
+
+            clr_w = C["fg"]    if (is_last and bl == "") else (190, 190, 190)
+            clr_b = C["fg"]    if (is_last and bl != "") else (190, 190, 190)
+
+            self.screen.blit(lf.render(f"{num}.", True, (80, 85, 95)), (x_num, y))
+            self.screen.blit(lf.render(wh, True, clr_w), (x_white, y))
+            if bl:
+                self.screen.blit(lf.render(bl, True, clr_b), (x_black, y))
 
     def _draw_promo(self, mouse):
         ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
