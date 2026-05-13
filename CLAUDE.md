@@ -6,14 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Install dependencies
-py -m pip install -r requirements.txt
+py -m pip install -r acoes_2026/requirements.txt
 
 # Run the app
-py -m streamlit run app.py
+py -m streamlit run acoes_2026/app.py
 
 # Kill running Streamlit and restart (Windows PowerShell)
 Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
-py -m streamlit run app.py --server.headless true
+py -m streamlit run acoes_2026/app.py --server.headless true
 ```
 
 The app runs at `http://localhost:8501`. The "Atualizar Dados" button in the sidebar clears the data cache and forces a fresh fetch from Yahoo Finance.
