@@ -1,9 +1,13 @@
-import sys
+import math
+import os
 import random
+import shutil
+import sys
 import threading
 import time
 
 import chess
+import chess.engine
 import pygame
 
 pygame.init()
@@ -208,6 +212,7 @@ class App:
         self.state      = "menu"    # "menu" | "difficulty" | "game"
         self.mode       = "pvp"     # "pvp" | "cpu"
         self.difficulty = "medium"  # "easy" | "medium" | "hard"
+        self.asset      = "classic"  # "pixel" | "classic"
         self.player_col = chess.WHITE
 
         self.board       = chess.Board()
@@ -222,12 +227,28 @@ class App:
         self._ai_gen       = 0      # increments on new game; prevents stale moves
         self._history      = []     # list of SAN strings, one per half-move
 
+        self._engine       = None
+        self._engine_ok    = False
+        self._analysis_on  = False
+        self._eval_cp      = 0      # centipawns from white's perspective; ±30000 = mate
+        self._best_move    = None   # chess.Move from latest Stockfish analysis
+        self._analysis_gen = 0
+        self._init_engine()
+
+        self._anim  = None          # current move animation, or None
+        self._muted = False
+        self._build_sounds()
+        self._load_sprites()
+
     # ── main loop ─────────────────────────────────────────────────────────
     def run(self):
         while True:
             mouse = pygame.mouse.get_pos()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
+                    if self._engine:
+                        try: self._engine.quit()
+                        except Exception: pass
                     pygame.quit()
                     sys.exit()
                 self._handle(event, mouse)
@@ -254,7 +275,11 @@ class App:
         click = event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
 
         if self.state == "menu":
-            if click and self._r("pvp").collidepoint(mouse):
+            if click and self._r("asset_pixel").collidepoint(mouse):
+                self.asset = "pixel";   self._apply_asset()
+            elif click and self._r("asset_classic").collidepoint(mouse):
+                self.asset = "classic"; self._apply_asset()
+            elif click and self._r("pvp").collidepoint(mouse):
                 self.mode = "pvp"
                 self._new_game()
             elif click and self._r("cpu").collidepoint(mouse):
@@ -275,11 +300,17 @@ class App:
                 if click:
                     for pt, rect in self._promo_rects().items():
                         if rect.collidepoint(mouse):
-                            move = chess.Move(self._promo_from, self.promoting, promotion=pt)
+                            move     = chess.Move(self._promo_from, self.promoting, promotion=pt)
+                            piece    = self.board.piece_at(self._promo_from)
+                            captured = self.board.piece_at(self.promoting)
                             self._history.append(self.board.san(move))
                             self.board.push(move)
-                            self.promoting = self._promo_from = None
+                            self.promoting   = None
+                            self._promo_from = None
                             self._status = self._get_status()
+                            self._request_analysis()
+                            self._start_move_anim(move, piece, None, None)
+                            self._play_move_sound(captured)
                             break
                 return
 
@@ -292,10 +323,17 @@ class App:
             if click and self._r("menu_btn").collidepoint(mouse):
                 self.state = "menu"
                 return
+            if click and self._r("stockfish_btn").collidepoint(mouse):
+                self._toggle_analysis()
+                return
+            if click and self._r("mute_btn").collidepoint(mouse):
+                self._muted = not self._muted
+                return
 
-            # Board click only on human's turn
+
+            # Board click only on human's turn (and not while animating)
             cpu_turn = self.mode == "cpu" and self.board.turn != self.player_col
-            if click and not cpu_turn and not self._ai_thinking:
+            if click and not cpu_turn and not self._ai_thinking and self._anim is None:
                 self._board_click(mouse)
 
     def _new_game(self):
@@ -308,7 +346,11 @@ class App:
         self._ai_move    = None
         self._ai_thinking = False
         self._history    = []
+        self._eval_cp    = 0
+        self._best_move  = None
+        self._anim       = None
         self.state       = "game"
+        self._request_analysis()
 
     def _board_click(self, mouse):
         if self._status in ("checkmate", "stalemate", "draw"):
@@ -356,10 +398,21 @@ class App:
 
     def _apply_move(self, move):
         self._history.append(self.board.san(move))  # SAN must be read before push
+        piece = self.board.piece_at(move.from_square)
+        if self.board.is_en_passant(move):
+            ep_sq    = chess.square(chess.square_file(move.to_square),
+                                    chess.square_rank(move.from_square))
+            captured = self.board.piece_at(ep_sq)
+        else:
+            ep_sq    = None
+            captured = self.board.piece_at(move.to_square)
         self.board.push(move)
         self.sel_sq    = None
         self.valid_sqs = []
         self._status   = self._get_status()
+        self._request_analysis()
+        self._start_move_anim(move, piece, captured, ep_sq)
+        self._play_move_sound(captured)
 
     def _get_status(self):
         if self.board.is_checkmate():             return "checkmate"
@@ -388,8 +441,101 @@ class App:
         self.valid_sqs = []
         self.promoting = self._promo_from = None
         self._ai_move  = None
+        self._anim     = None
         self._ai_gen  += 1   # discard any in-flight CPU move
         self._status   = self._get_status()
+        self._request_analysis()
+
+    def _start_move_anim(self, move, piece, captured, ep_sq):
+        self._anim = {
+            "from_sq":  move.from_square,
+            "to_sq":    move.to_square,
+            "piece":    piece,
+            "captured": captured,
+            "cap_sq":   ep_sq if ep_sq is not None else move.to_square,
+            "start":    time.monotonic(),
+            "dur":      0.18,
+        }
+
+    # ── sounds ───────────────────────────────────────────────────────────
+    def _gen_seq(self, notes, sr=44100):
+        import array as _arr
+        buf = _arr.array('h')
+        for freq, dur, vol in notes:
+            n    = int(sr * dur)
+            fade = max(1, min(int(sr * 0.015), n // 3))
+            for i in range(n):
+                if i < fade:           env = i / fade
+                elif i > n - fade:     env = (n - i) / fade
+                else:                  env = 1.0
+                if freq > 0:
+                    s = int(32767 * vol * env * math.sin(2 * math.pi * freq * i / sr))
+                else:
+                    s = 0
+                buf.extend((s, s))   # stereo L+R
+        return pygame.mixer.Sound(buffer=buf)
+
+    def _build_sounds(self):
+        try:
+            self._snd_move     = self._gen_seq([(520, 0.06, 0.35)])
+            self._snd_capture  = self._gen_seq([(380, 0.05, 0.55), (240, 0.09, 0.65)])
+            self._snd_check    = self._gen_seq([(660, 0.06, 0.45), (0, 0.03, 0),
+                                                (880, 0.09, 0.50)])
+            self._snd_gameover = self._gen_seq([(523, 0.13, 0.50), (0, 0.02, 0),
+                                                (440, 0.13, 0.45), (0, 0.02, 0),
+                                                (330, 0.22, 0.55)])
+        except Exception:
+            self._snd_move = self._snd_capture = self._snd_check = self._snd_gameover = None
+
+    def _load_sprites(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self._asset_packs = {}
+        for name, loader in [("pixel", self._load_pixel_pack),
+                              ("classic", self._load_classic_pack)]:
+            try:
+                self._asset_packs[name] = loader(root)
+            except Exception:
+                self._asset_packs[name] = {"sprites": {}, "board": None}
+        self._apply_asset()
+
+    def _load_pixel_pack(self, root):
+        PIECE_FILES = {
+            chess.KING:   "chess-king",   chess.QUEEN:  "chess-queen",
+            chess.ROOK:   "chess-rook",   chess.BISHOP: "chess-bishop",
+            chess.KNIGHT: "chess-knight", chess.PAWN:   "chess-pawn",
+        }
+        base    = os.path.join(root, "Chess_asset")
+        sprites = {}
+        for pt, name in PIECE_FILES.items():
+            for color, suffix in [(chess.WHITE, "white"), (chess.BLACK, "black")]:
+                img = pygame.image.load(
+                    os.path.join(base, f"{name}-{suffix}.png")).convert_alpha()
+                sprites[(color, pt)] = pygame.transform.smoothscale(img, (SQ, SQ))
+        board_raw = pygame.image.load(os.path.join(base, "board.png")).convert()
+        return {"sprites": sprites,
+                "board": pygame.transform.smoothscale(board_raw, (SQ * 8, SQ * 8))}
+
+    def _load_classic_pack(self, _root):
+        return {"sprites": {}, "board": None}
+
+    def _apply_asset(self):
+        pack            = self._asset_packs.get(self.asset, {})
+        self._sprites   = pack.get("sprites", {})
+        self._board_img = pack.get("board", None)
+
+    def _play_move_sound(self, captured):
+        if self._muted:
+            return
+        if self._status in ("checkmate", "stalemate", "draw"):
+            snd = self._snd_gameover
+        elif self._status == "check":
+            snd = self._snd_check
+        elif captured:
+            snd = self._snd_capture
+        else:
+            snd = self._snd_move
+        if snd:
+            snd.play()
 
     # ── AI ────────────────────────────────────────────────────────────────
     def _start_ai(self):
@@ -410,23 +556,85 @@ class App:
 
         threading.Thread(target=think, daemon=True).start()
 
+    def _init_engine(self):
+        candidates = ["stockfish"]
+        for p in [
+            r"C:\stockfish\stockfish-windows-x86-64-avx2.exe",
+            r"C:\stockfish\stockfish-windows-x86-64.exe",
+            r"C:\stockfish\stockfish.exe",
+            r"C:\Program Files\Stockfish\stockfish.exe",
+            r"C:\Program Files (x86)\Stockfish\stockfish.exe",
+        ]:
+            candidates.append(p)
+        for c in candidates:
+            if shutil.which(c) is None and not os.path.isfile(c):
+                continue
+            try:
+                self._engine = chess.engine.SimpleEngine.popen_uci(c)
+                self._engine_ok = True
+                return
+            except Exception:
+                pass
+
+    def _toggle_analysis(self):
+        if not self._engine_ok:
+            return
+        self._analysis_on = not self._analysis_on
+        if self._analysis_on:
+            self._request_analysis()
+        else:
+            self._eval_cp   = 0
+            self._best_move = None
+
+    def _request_analysis(self):
+        if not self._engine_ok or not self._analysis_on:
+            return
+        if self.board.is_game_over():
+            self._eval_cp   = 0
+            self._best_move = None
+            return
+        self._analysis_gen += 1
+        gen        = self._analysis_gen
+        board_copy = self.board.copy()
+
+        def analyse():
+            try:
+                info  = self._engine.analyse(board_copy, chess.engine.Limit(time=0.3))
+                if self._analysis_gen != gen:
+                    return
+                score = info["score"].white()
+                if score.is_mate():
+                    m = score.mate()
+                    self._eval_cp = 30000 if m > 0 else -30000
+                else:
+                    self._eval_cp = score.score() or 0
+                self._best_move = info.get("pv", [None])[0]
+            except Exception:
+                pass
+
+        threading.Thread(target=analyse, daemon=True).start()
+
     # ── button rects ──────────────────────────────────────────────────────
     def _r(self, name):
         cx    = WIN_W // 2
         sb_cx = SBX + SBW // 2
         table = {
             # menu
-            "pvp":      (cx - 130, WIN_H // 2 - 20, 260, 50),
-            "cpu":      (cx - 130, WIN_H // 2 + 40, 260, 50),
+            "pvp":           (cx - 130, WIN_H // 2 - 20,  260, 50),
+            "cpu":           (cx - 130, WIN_H // 2 + 40,  260, 50),
+            "asset_pixel":   (cx - 130, WIN_H // 2 + 120, 124, 36),
+            "asset_classic": (cx + 6,   WIN_H // 2 + 120, 124, 36),
             # difficulty
             "easy":     (cx - 110, WIN_H // 2 - 58, 220, 44),
             "medium":   (cx - 110, WIN_H // 2 -  4, 220, 44),
             "hard":     (cx - 110, WIN_H // 2 + 50, 220, 44),
             "back":     (cx - 110, WIN_H // 2 + 116, 220, 36),
-            # game sidebar
-            "undo":     (sb_cx - 70, BY + SQ * 8 - 140, 140, 36),
-            "new":      (sb_cx - 70, BY + SQ * 8 -  96, 140, 36),
-            "menu_btn": (sb_cx - 70, BY + SQ * 8 -  52, 140, 36),
+            # game sidebar (5 buttons stacked 44px apart from bottom)
+            "mute_btn":      (sb_cx - 70, BY + SQ * 8 - 228, 140, 36),
+            "stockfish_btn": (sb_cx - 70, BY + SQ * 8 - 184, 140, 36),
+            "undo":          (sb_cx - 70, BY + SQ * 8 - 140, 140, 36),
+            "new":           (sb_cx - 70, BY + SQ * 8 -  96, 140, 36),
+            "menu_btn":      (sb_cx - 70, BY + SQ * 8 -  52, 140, 36),
         }
         return pygame.Rect(table[name])
 
@@ -447,6 +655,8 @@ class App:
             self._draw_difficulty(mouse)
         else:
             self._draw_board()
+            if self._analysis_on and self._best_move and not self.board.is_game_over():
+                self._draw_arrow(self._best_move.from_square, self._best_move.to_square)
             self._draw_sidebar(mouse)
             if self.promoting:
                 self._draw_promo(mouse)
@@ -463,6 +673,14 @@ class App:
 
         self._btn(self._r("pvp"), "Jogador vs Jogador", mouse, C["neu"], C["neu_hov"])
         self._btn(self._r("cpu"), "Jogador vs CPU",     mouse, C["red"], C["red_hov"])
+
+        lbl = self.lf.render("Visual:", True, C["hint"])
+        self.screen.blit(lbl, lbl.get_rect(center=(WIN_W // 2, WIN_H // 2 + 107)))
+        for key, label in [("asset_pixel", "Pixel Art"), ("asset_classic", "Classic")]:
+            active = self.asset == key.replace("asset_", "")
+            self._btn(self._r(key), label, mouse,
+                      C["green"]     if active else C["neu"],
+                      C["green_hov"] if active else C["neu_hov"])
 
     def _draw_difficulty(self, mouse):
         t = self.ub.render("Escolha a dificuldade", True, C["fg"])
@@ -493,51 +711,85 @@ class App:
         last     = board.peek() if board.move_stack else None
         last_sqs = {last.from_square, last.to_square} if last else set()
 
-        for r in range(8):
-            for c in range(8):
-                sq    = chess.square(c, 7 - r)
-                color = C["light"] if (r + c) % 2 == 0 else C["dark"]
-                if sq in last_sqs:
-                    color = C["last"]
-                pygame.draw.rect(self.screen, color, (BX + c * SQ, BY + r * SQ, SQ, SQ))
+        # ── advance animation ─────────────────────────────────────────────────
+        anim = self._anim
+        t    = 0.0
+        if anim:
+            raw = min((time.monotonic() - anim["start"]) / anim["dur"], 1.0)
+            t   = raw * raw * (3 - 2 * raw)
+            if raw >= 1.0:
+                self._anim = None
+                anim       = None
+
+        # ── board image (or fallback to colored squares) ──────────────────────
+        if self._board_img:
+            self.screen.blit(self._board_img, (BX, BY))
+        else:
+            for r in range(8):
+                for c in range(8):
+                    color = C["light"] if (r + c) % 2 == 0 else C["dark"]
+                    pygame.draw.rect(self.screen, color, (BX + c*SQ, BY + r*SQ, SQ, SQ))
+
+        # ── square overlays (semi-transparent) ───────────────────────────────
+        ov = pygame.Surface((SQ, SQ), pygame.SRCALPHA)
+
+        for sq in last_sqs:
+            c = chess.square_file(sq);  r = 7 - chess.square_rank(sq)
+            ov.fill((205, 209, 110, 100))
+            self.screen.blit(ov, (BX + c * SQ, BY + r * SQ))
 
         if self.sel_sq is not None:
-            c = chess.square_file(self.sel_sq)
-            r = 7 - chess.square_rank(self.sel_sq)
-            pygame.draw.rect(self.screen, C["sel"], (BX + c * SQ, BY + r * SQ, SQ, SQ))
+            c = chess.square_file(self.sel_sq);  r = 7 - chess.square_rank(self.sel_sq)
+            ov.fill((123, 201, 126, 150))
+            self.screen.blit(ov, (BX + c * SQ, BY + r * SQ))
 
         if self._status in ("check", "checkmate"):
             ksq = board.king(board.turn)
             if ksq is not None:
-                kc = chess.square_file(ksq)
-                kr = 7 - chess.square_rank(ksq)
-                pygame.draw.rect(self.screen, C["check_sq"],
-                                 (BX + kc * SQ, BY + kr * SQ, SQ, SQ))
+                kc    = chess.square_file(ksq);  kr = 7 - chess.square_rank(ksq)
+                pulse = 0.5 + 0.5 * math.sin(pygame.time.get_ticks() / 180.0)
+                ov.fill((230, 57, 70, int(190 * pulse)))
+                self.screen.blit(ov, (BX + kc * SQ, BY + kr * SQ))
 
+        # ── valid-move hints ──────────────────────────────────────────────────
         for sq in self.valid_sqs:
-            c   = chess.square_file(sq)
-            r   = 7 - chess.square_rank(sq)
-            cx_ = BX + c * SQ + SQ // 2
-            cy_ = BY + r * SQ + SQ // 2
+            c   = chess.square_file(sq);  r = 7 - chess.square_rank(sq)
+            cx_ = BX + c * SQ + SQ // 2;  cy_ = BY + r * SQ + SQ // 2
             if board.piece_at(sq):
                 pygame.draw.circle(self.screen, C["sel"], (cx_, cy_), SQ // 2 - 3, 4)
             else:
                 pygame.draw.circle(self.screen, C["sel"], (cx_, cy_), 9)
 
+        # ── captured piece fading out ─────────────────────────────────────────
+        if anim and anim["captured"]:
+            cc = chess.square_file(anim["cap_sq"]);  cr = 7 - chess.square_rank(anim["cap_sq"])
+            self._draw_piece_alpha(anim["captured"],
+                                   BX + cc * SQ + SQ // 2,
+                                   BY + cr * SQ + SQ // 2,
+                                   int(255 * (1.0 - t)))
+
+        # ── static pieces ─────────────────────────────────────────────────────
+        skip = anim["to_sq"] if anim else -1
         for r in range(8):
             for c in range(8):
-                p = board.piece_at(chess.square(c, 7 - r))
-                if not p:
+                sq = chess.square(c, 7 - r)
+                if sq == skip:
                     continue
-                cx_ = BX + c * SQ + SQ // 2
-                cy_ = BY + r * SQ + SQ // 2
-                fill = (255, 255, 255) if p.color == chess.WHITE else (17,  17,  17)
-                shd  = (68,  68,  68)  if p.color == chess.WHITE else (153, 153, 153)
-                sym  = SYMS[(p.color, p.piece_type)]
-                for dx, dy, col in ((1, 2, shd), (0, 0, fill)):
-                    s = self.pf.render(sym, True, col)
-                    self.screen.blit(s, s.get_rect(center=(cx_ + dx, cy_ + dy)))
+                p = board.piece_at(sq)
+                if p:
+                    self._draw_piece(p, BX + c * SQ + SQ // 2, BY + r * SQ + SQ // 2)
 
+        # ── moving piece at interpolated position ─────────────────────────────
+        if anim:
+            fc  = chess.square_file(anim["from_sq"]);  fr = 7 - chess.square_rank(anim["from_sq"])
+            tc  = chess.square_file(anim["to_sq"]);    tr = 7 - chess.square_rank(anim["to_sq"])
+            fx  = BX + fc * SQ + SQ // 2;  fy  = BY + fr * SQ + SQ // 2
+            tx_ = BX + tc * SQ + SQ // 2;  ty_ = BY + tr * SQ + SQ // 2
+            self._draw_piece(anim["piece"],
+                             int(fx + (tx_ - fx) * t),
+                             int(fy + (ty_ - fy) * t))
+
+        # ── coordinate labels ─────────────────────────────────────────────────
         for c, ltr in enumerate("abcdefgh"):
             col = C["light"] if c % 2 == 0 else C["dark"]
             s   = self.lf.render(ltr, True, col)
@@ -548,6 +800,31 @@ class App:
             s   = self.lf.render(str(8 - r), True, col)
             self.screen.blit(s, (BX + 3, BY + r * SQ + 3))
 
+    def _draw_piece(self, p, cx, cy):
+        sprite = self._sprites.get((p.color, p.piece_type))
+        if sprite:
+            self.screen.blit(sprite, sprite.get_rect(center=(cx, cy)))
+        else:
+            fill = (255, 255, 255) if p.color == chess.WHITE else ( 17,  17,  17)
+            shd  = ( 68,  68,  68) if p.color == chess.WHITE else (153, 153, 153)
+            sym  = SYMS[(p.color, p.piece_type)]
+            for dx, dy, col in ((1, 2, shd), (0, 0, fill)):
+                s = self.pf.render(sym, True, col)
+                self.screen.blit(s, s.get_rect(center=(cx + dx, cy + dy)))
+
+    def _draw_piece_alpha(self, p, cx, cy, alpha):
+        sprite = self._sprites.get((p.color, p.piece_type))
+        if sprite:
+            surf = sprite.copy()
+            surf.set_alpha(alpha)
+            self.screen.blit(surf, surf.get_rect(center=(cx, cy)))
+        else:
+            fill = (255, 255, 255) if p.color == chess.WHITE else (17, 17, 17)
+            sym  = SYMS[(p.color, p.piece_type)]
+            surf = self.pf.render(sym, True, fill)
+            surf.set_alpha(alpha)
+            self.screen.blit(surf, surf.get_rect(center=(cx, cy)))
+
     def _draw_sidebar(self, mouse):
         pygame.draw.rect(self.screen, C["sidebar"],
                          (SBX, BY, SBW, SQ * 8), border_radius=12)
@@ -555,6 +832,7 @@ class App:
 
         t = self.ub.render("Xadrez", True, C["fg"])
         self.screen.blit(t, t.get_rect(center=(cx, BY + 28)))
+
 
         turn   = self.board.turn
         sym_s  = self.sf.render("♔" if turn == chess.WHITE else "♚", True, C["fg"])
@@ -598,16 +876,41 @@ class App:
         self._btn(self._r("new"),      "Reiniciar",  mouse, C["neu"], C["neu_hov"])
         self._btn(self._r("menu_btn"), "< Menu",     mouse, C["neu"], C["neu_hov"])
 
+        if not self._engine_ok:
+            sf_lbl, sf_bg, sf_hov = "Stockfish n/d", (20, 22, 28), (20, 22, 28)
+        elif self._analysis_on:
+            sf_lbl, sf_bg, sf_hov = "Stockfish: ON",  C["green"], C["green_hov"]
+        else:
+            sf_lbl, sf_bg, sf_hov = "Stockfish: OFF", C["neu"],   C["neu_hov"]
+        self._btn(self._r("stockfish_btn"), sf_lbl, mouse, sf_bg, sf_hov)
+
+        if self._muted:
+            self._btn(self._r("mute_btn"), "Som: OFF", mouse, (35, 28, 28), (50, 38, 38))
+        else:
+            self._btn(self._r("mute_btn"), "Som: ON",  mouse, C["neu"], C["neu_hov"])
+
     def _draw_history(self):
-        box = pygame.Rect(SBX + 8, BY + 116, SBW - 16, BY + SQ * 8 - 148 - 116)
-        # box bottom = BY+SQ*8 - 148 = 380  (8px above first button at 388)
+        # box bottom = BY+SQ*8-236 = 292, 8px above mute_btn top at 300
+        box = pygame.Rect(SBX + 8, BY + 116, SBW - 16, SQ * 8 - 352)
 
         pygame.draw.rect(self.screen, (18, 22, 30), box, border_radius=6)
 
-        cx  = box.centerx
         lf  = self.lf
+
+        # Header: "Historico" left side, eval score right side (if analysis on)
         hdr = lf.render("Historico", True, C["hint"])
-        self.screen.blit(hdr, hdr.get_rect(center=(cx, box.top + 10)))
+        self.screen.blit(hdr, (box.left + 5, box.top + 4))
+        if self._analysis_on and self._engine_ok:
+            cp = self._eval_cp
+            if abs(cp) >= 29000:
+                m = (30000 - abs(cp)) + 1
+                ev_txt = f"M{m}" if cp > 0 else f"-M{m}"
+                ev_col = (220, 220, 220) if cp > 0 else (120, 120, 120)
+            else:
+                ev_txt = f"{cp/100:+.1f}"
+                ev_col = (220, 220, 220) if cp >= 0 else (150, 150, 150)
+            ev_s = lf.render(ev_txt, True, ev_col)
+            self.screen.blit(ev_s, (box.right - ev_s.get_width() - 5, box.top + 4))
 
         # thin separator
         pygame.draw.line(self.screen, (40, 46, 56),
@@ -649,6 +952,33 @@ class App:
             self.screen.blit(lf.render(wh, True, clr_w), (x_white, y))
             if bl:
                 self.screen.blit(lf.render(bl, True, clr_b), (x_black, y))
+
+    def _draw_arrow(self, from_sq, to_sq):
+        fc, fr = chess.square_file(from_sq), chess.square_rank(from_sq)
+        tc, tr = chess.square_file(to_sq),   chess.square_rank(to_sq)
+        fx = BX + fc * SQ + SQ // 2
+        fy = BY + (7 - fr) * SQ + SQ // 2
+        tx = BX + tc * SQ + SQ // 2
+        ty = BY + (7 - tr) * SQ + SQ // 2
+
+        dx, dy = tx - fx, ty - fy
+        dist   = math.hypot(dx, dy)
+        if dist < 1:
+            return
+        ux, uy    = dx / dist, dy / dist
+        head_len  = 20
+        shaft_end = (tx - ux * head_len, ty - uy * head_len)
+        side_x, side_y = -uy * head_len * 0.55, ux * head_len * 0.55
+
+        color = (255, 170, 0, 160)
+        ov    = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
+        pygame.draw.line(ov, color, (fx, fy), shaft_end, 7)
+        pygame.draw.polygon(ov, color, [
+            (int(tx), int(ty)),
+            (int(shaft_end[0] + side_x), int(shaft_end[1] + side_y)),
+            (int(shaft_end[0] - side_x), int(shaft_end[1] - side_y)),
+        ])
+        self.screen.blit(ov, (0, 0))
 
     def _draw_promo(self, mouse):
         ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
