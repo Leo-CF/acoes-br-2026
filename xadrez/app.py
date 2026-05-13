@@ -1,41 +1,53 @@
-import tkinter as tk
-import customtkinter as ctk
+import sys
+import pygame
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("dark-blue")
+pygame.init()
 
-SQ = 64
-ML, MT, MB = 20, 8, 20
-CW = ML + SQ * 8 + 8    # 540
-CH = MT + SQ * 8 + MB   # 540
+# ── layout ──────────────────────────────────────────────────────────────────
+SQ    = 64
+BX, BY = 16, 16                  # board top-left
+SBX   = BX + SQ * 8 + 16        # sidebar left  (= 544)
+SBW   = 180                      # sidebar width
+WIN_W = SBX + SBW + 12          # 736
+WIN_H = BY + SQ * 8 + BY        # 544
 
+# ── colors ───────────────────────────────────────────────────────────────────
 C = {
-    "bg":       "#0e1117",
-    "sidebar":  "#161b22",
-    "light":    "#f0d9b5",
-    "dark":     "#b58863",
-    "sel":      "#7bc97e",
-    "check_sq": "#e63946",
-    "last":     "#cdd16e",
-    "fg":       "#ffffff",
-    "hint":     "#888888",
-    "red":      "#e63946",
-    "red_hov":  "#c0392b",
-    "neu":      "#1e222a",
-    "neu_hov":  "#2e3340",
+    "bg":       (14,  17,  23),
+    "sidebar":  (22,  27,  34),
+    "light":    (240, 217, 181),
+    "dark":     (181, 136, 99),
+    "sel":      (123, 201, 126),
+    "check_sq": (230, 57,  70),
+    "last":     (205, 209, 110),
+    "fg":       (255, 255, 255),
+    "hint":     (136, 136, 136),
+    "red":      (230, 57,  70),
+    "red_hov":  (192, 57,  43),
+    "neu":      (30,  34,  42),
+    "neu_hov":  (46,  51,  64),
 }
 
 SYMS = {
-    ('w', 'K'): '♔', ('w', 'Q'): '♕', ('w', 'R'): '♖',
-    ('w', 'B'): '♗', ('w', 'N'): '♘', ('w', 'P'): '♙',
-    ('b', 'K'): '♚', ('b', 'Q'): '♛', ('b', 'R'): '♜',
-    ('b', 'B'): '♝', ('b', 'N'): '♞', ('b', 'P'): '♟',
+    ('w','K'):'♔', ('w','Q'):'♕', ('w','R'):'♖',
+    ('w','B'):'♗', ('w','N'):'♘', ('w','P'):'♙',
+    ('b','K'):'♚', ('b','Q'):'♛', ('b','R'):'♜',
+    ('b','B'):'♝', ('b','N'):'♞', ('b','P'):'♟',
 }
-PFONT = ("Segoe UI Symbol", 38)
-LFONT = ("Segoe UI", 9)
 
 
-# ── chess logic ────────────────────────────────────────────────────────────
+def _font(names, size, bold=False):
+    for name in names:
+        path = pygame.font.match_font(name, bold=bold)
+        if path:
+            try:
+                return pygame.font.Font(path, size)
+            except Exception:
+                pass
+    return pygame.font.Font(None, size)
+
+
+# ── chess logic ──────────────────────────────────────────────────────────────
 
 class ChessGame:
     def __init__(self):
@@ -182,7 +194,7 @@ class ChessGame:
     def _castling_moves(self, color):
         moves = []
         rank = 7 if color == 'w' else 0
-        opp = self._opp(color)
+        opp  = self._opp(color)
         if self.castling[color]['K']:
             if (self.board[rank][5] is None and self.board[rank][6] is None
                     and self.board[rank][7] == (color, 'R')
@@ -201,7 +213,7 @@ class ChessGame:
         return moves
 
     def make_move(self, fr, fc, tr, tc):
-        """Execute move. Returns ('promo', (r, c)) or ('ok', None)."""
+        """Returns ('promo', (r,c)) or ('ok', None)."""
         p = self.board[fr][fc]
         color, pt = p
 
@@ -248,7 +260,7 @@ class ChessGame:
 
     def status(self):
         color = self.turn
-        chk = self.in_check(color)
+        chk   = self.in_check(color)
         for r in range(8):
             for c in range(8):
                 p = self.board[r][c]
@@ -257,278 +269,287 @@ class ChessGame:
         return 'checkmate' if chk else 'stalemate'
 
 
-# ── promotion dialog ────────────────────────────────────────────────────────
+# ── app ──────────────────────────────────────────────────────────────────────
 
-class PromotionDialog(ctk.CTkToplevel):
-    def __init__(self, parent, color):
-        super().__init__(parent)
-        self.title("Promoção de Peão")
-        self.resizable(False, False)
-        self.grab_set()
-        self.choice = 'Q'
+class App:
+    def __init__(self):
+        self.screen = pygame.display.set_mode((WIN_W, WIN_H))
+        pygame.display.set_caption("Xadrez")
+        self.clock = pygame.time.Clock()
 
-        ctk.CTkLabel(
-            self, text="Escolha a peça:",
-            font=ctk.CTkFont("Segoe UI", 14),
-        ).pack(pady=(16, 8), padx=16)
+        chess_names = ["segoeuisymbol", "seguisymbol", "arialunicodems", "notosanssymbols2"]
+        ui_names    = ["segoui", "segoeui", "calibri", "arial", "helvetica"]
+        self.pf = _font(chess_names, 42)          # piece symbols (large)
+        self.sf = _font(chess_names, 18)          # piece symbols (small, sidebar)
+        self.uf = _font(ui_names,    14)          # UI text
+        self.ub = _font(ui_names,    14, True)    # UI text bold
+        self.lf = _font(ui_names,    11)          # board coordinate labels
+        self.tf = _font(ui_names,    52, True)    # menu title
 
-        row_frame = ctk.CTkFrame(self, fg_color="transparent")
-        row_frame.pack(padx=16, pady=(0, 16))
+        self.state     = "menu"
+        self.game      = ChessGame()
+        self.selected  = None
+        self.valid     = []
+        self.promoting = None        # (row, col) while waiting for promo choice
+        self._status   = 'playing'  # cached — updated after every move
 
-        for pt, name in [('Q', 'Dama'), ('R', 'Torre'), ('B', 'Bispo'), ('N', 'Cavalo')]:
-            sym = SYMS[(color, pt)]
-            ctk.CTkButton(
-                row_frame, text=f"{sym}\n{name}",
-                font=ctk.CTkFont("Segoe UI Symbol", 20),
-                width=80, height=80, corner_radius=8,
-                fg_color=C["neu"], hover_color=C["neu_hov"],
-                command=lambda t=pt: self._pick(t),
-            ).pack(side="left", padx=4)
+    # ── main loop ─────────────────────────────────────────────────────────
+    def run(self):
+        while True:
+            mouse = pygame.mouse.get_pos()
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+                self._handle(event, mouse)
+            self.screen.fill(C["bg"])
+            self._draw(mouse)
+            pygame.display.flip()
+            self.clock.tick(60)
 
-    def _pick(self, t):
-        self.choice = t
-        self.destroy()
+    # ── event handling ────────────────────────────────────────────────────
+    def _handle(self, event, mouse):
+        click = event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
 
+        if self.state == "menu":
+            if click and self._r_start().collidepoint(mouse):
+                self._new_game()
+            return
 
-# ── menu frame ──────────────────────────────────────────────────────────────
+        # game state
+        if self.promoting:
+            if click:
+                for pt, rect in self._promo_rects().items():
+                    if rect.collidepoint(mouse):
+                        self.game.finish_promotion(*self.promoting, pt)
+                        self.promoting = None
+                        self._status = self.game.status()
+                        break
+            return
 
-class MenuFrame(ctk.CTkFrame):
-    def __init__(self, parent, on_start):
-        super().__init__(parent, fg_color=C["bg"])
-        self._on_start = on_start
+        if click and self._r_new().collidepoint(mouse):
+            self._new_game()
+        elif click and self._r_menu().collidepoint(mouse):
+            self.state = "menu"
+        elif click:
+            self._board_click(mouse)
 
-        ctk.CTkLabel(
-            self, text="♟  Xadrez",
-            font=ctk.CTkFont("Segoe UI Symbol", 52, weight="bold"),
-            text_color=C["fg"],
-        ).place(relx=0.5, rely=0.32, anchor="center")
-
-        ctk.CTkLabel(
-            self, text="dois jogadores  •  local",
-            font=ctk.CTkFont("Segoe UI", 15),
-            text_color=C["hint"],
-        ).place(relx=0.5, rely=0.44, anchor="center")
-
-        ctk.CTkButton(
-            self,
-            text="▶  Iniciar Partida",
-            font=ctk.CTkFont("Segoe UI", 15, weight="bold"),
-            width=200, height=52, corner_radius=26,
-            fg_color=C["red"], hover_color=C["red_hov"],
-            command=self._on_start,
-        ).place(relx=0.5, rely=0.58, anchor="center")
-
-
-# ── game frame ──────────────────────────────────────────────────────────────
-
-class GameFrame(ctk.CTkFrame):
-    def __init__(self, parent, on_menu):
-        super().__init__(parent, fg_color=C["bg"])
-        self._on_menu = on_menu
-        self.game = ChessGame()
-        self._selected = None
-        self._valid = []
-        self._build()
-
-    def start_new(self):
+    def _new_game(self):
         self.game.reset()
-        self._selected = None
-        self._valid = []
-        self._refresh()
+        self.selected  = None
+        self.valid     = []
+        self.promoting = None
+        self._status   = 'playing'
+        self.state     = "game"
 
-    def _build(self):
-        self._cv = tk.Canvas(
-            self, width=CW, height=CH,
-            bg=C["bg"], highlightthickness=0,
-        )
-        self._cv.pack(side="left", padx=(12, 0), pady=12)
-        self._cv.bind("<Button-1>", self._click)
-
-        sb = ctk.CTkFrame(self, fg_color=C["sidebar"], corner_radius=12, width=170)
-        sb.pack(side="left", fill="y", padx=12, pady=12)
-        sb.pack_propagate(False)
-
-        ctk.CTkLabel(
-            sb, text="Xadrez",
-            font=ctk.CTkFont("Segoe UI", 22, weight="bold"),
-        ).pack(pady=(24, 4))
-
-        self._lbl_turn = ctk.CTkLabel(
-            sb, text="",
-            font=ctk.CTkFont("Segoe UI Symbol", 14),
-        )
-        self._lbl_turn.pack(pady=4)
-
-        self._lbl_status = ctk.CTkLabel(
-            sb, text="",
-            font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
-        )
-        self._lbl_status.pack(pady=2)
-
-        ctk.CTkButton(
-            sb, text="⟳  Nova Partida",
-            font=ctk.CTkFont("Segoe UI", 12),
-            width=140, height=36, corner_radius=8,
-            fg_color=C["neu"], hover_color=C["neu_hov"],
-            command=self.start_new,
-        ).pack(pady=(50, 8))
-
-        ctk.CTkButton(
-            sb, text="← Menu",
-            font=ctk.CTkFont("Segoe UI", 12),
-            width=140, height=36, corner_radius=8,
-            fg_color=C["neu"], hover_color=C["neu_hov"],
-            command=self._on_menu,
-        ).pack(pady=8)
-
-    def _sq_rect(self, r, c):
-        x0 = ML + c * SQ
-        y0 = MT + r * SQ
-        return x0, y0, x0 + SQ, y0 + SQ
-
-    def _sq_center(self, r, c):
-        x0, y0, x1, y1 = self._sq_rect(r, c)
-        return (x0 + x1) // 2, (y0 + y1) // 2
-
-    def _refresh(self):
-        cv = self._cv
-        cv.delete("all")
-        g = self.game
-        st = g.status()
-        last_sqs = set(g.last_move) if g.last_move else set()
-
-        for r in range(8):
-            for c in range(8):
-                x0, y0, x1, y1 = self._sq_rect(r, c)
-                color = C["light"] if (r + c) % 2 == 0 else C["dark"]
-                if (r, c) in last_sqs:
-                    color = C["last"]
-                cv.create_rectangle(x0, y0, x1, y1, fill=color, outline="")
-
-        if self._selected:
-            x0, y0, x1, y1 = self._sq_rect(*self._selected)
-            cv.create_rectangle(x0, y0, x1, y1, fill=C["sel"], outline="")
-
-        if st in ('check', 'checkmate'):
-            kp = g._king_pos(g.turn)
-            if kp:
-                x0, y0, x1, y1 = self._sq_rect(*kp)
-                cv.create_rectangle(x0, y0, x1, y1, fill=C["check_sq"], outline="")
-
-        for r, c in self._valid:
-            x0, y0, x1, y1 = self._sq_rect(r, c)
-            cx_, cy_ = self._sq_center(r, c)
-            if g.board[r][c]:
-                cv.create_oval(x0 + 3, y0 + 3, x1 - 3, y1 - 3,
-                               outline=C["sel"], width=4, fill="")
-            else:
-                d = 9
-                cv.create_oval(cx_ - d, cy_ - d, cx_ + d, cy_ + d,
-                               fill=C["sel"], outline="")
-
-        for r in range(8):
-            for c in range(8):
-                p = g.board[r][c]
-                if p:
-                    cx_, cy_ = self._sq_center(r, c)
-                    fill = "#ffffff" if p[0] == 'w' else "#111111"
-                    shd  = "#444444" if p[0] == 'w' else "#999999"
-                    cv.create_text(cx_ + 1, cy_ + 2, text=SYMS[p], font=PFONT, fill=shd)
-                    cv.create_text(cx_, cy_, text=SYMS[p], font=PFONT, fill=fill)
-
-        for c, ltr in enumerate("abcdefgh"):
-            cv.create_text(ML + c * SQ + SQ // 2, MT + 8 * SQ + 10,
-                           text=ltr, font=LFONT,
-                           fill=C["light"] if c % 2 == 0 else C["dark"])
-        for r in range(8):
-            cv.create_text(ML // 2, MT + r * SQ + SQ // 2,
-                           text=str(8 - r), font=LFONT,
-                           fill=C["dark"] if r % 2 == 0 else C["light"])
-
-        sym = "♔" if g.turn == 'w' else "♚"
-        name = "Brancas" if g.turn == 'w' else "Pretas"
-        self._lbl_turn.configure(text=f"{sym}  {name}")
-
-        status_info = {
-            'playing':   ('', C["hint"]),
-            'check':     ('Xeque!', C["red"]),
-            'checkmate': ('Xeque-mate!', C["red"]),
-            'stalemate': ('Empate', C["hint"]),
-        }
-        txt, clr = status_info.get(st, ('', C["hint"]))
-        self._lbl_status.configure(text=txt, text_color=clr)
-
-        if st in ('checkmate', 'stalemate'):
-            self._selected = None
-            self._valid = []
-
-    def _click(self, event):
-        col = (event.x - ML) // SQ
-        row = (event.y - MT) // SQ
+    def _board_click(self, mouse):
+        if self._status in ('checkmate', 'stalemate'):
+            return
+        col = (mouse[0] - BX) // SQ
+        row = (mouse[1] - BY) // SQ
         if not (0 <= row < 8 and 0 <= col < 8):
             return
         g = self.game
-        if g.status() in ('checkmate', 'stalemate'):
-            return
         p = g.board[row][col]
 
-        if self._selected:
-            if (row, col) in self._valid:
-                result, extra = g.make_move(*self._selected, row, col)
-                self._selected = None
-                self._valid = []
+        if self.selected:
+            if (row, col) in self.valid:
+                result, extra = g.make_move(*self.selected, row, col)
+                self.selected = None
+                self.valid    = []
                 if result == 'promo':
-                    self._refresh()
-                    self._do_promotion(*extra)
+                    self.promoting = extra
                 else:
-                    self._refresh()
+                    self._status = g.status()
                 return
             if p and p[0] == g.turn:
-                self._selected = (row, col)
-                self._valid = g.legal_moves(row, col)
-                self._refresh()
+                self.selected = (row, col)
+                self.valid    = g.legal_moves(row, col)
                 return
-            self._selected = None
-            self._valid = []
-            self._refresh()
+            self.selected = None
+            self.valid    = []
             return
 
         if p and p[0] == g.turn:
-            self._selected = (row, col)
-            self._valid = g.legal_moves(row, col)
-            self._refresh()
+            self.selected = (row, col)
+            self.valid    = g.legal_moves(row, col)
 
-    def _do_promotion(self, row, col):
-        color = self.game.board[row][col][0]
-        dlg = PromotionDialog(self.winfo_toplevel(), color)
-        self.wait_window(dlg)
-        self.game.finish_promotion(row, col, dlg.choice)
-        self._refresh()
+    # ── button rects ──────────────────────────────────────────────────────
+    def _r_start(self):
+        return pygame.Rect(WIN_W // 2 - 100, WIN_H // 2 + 10, 200, 52)
 
+    def _r_new(self):
+        return pygame.Rect(SBX + SBW // 2 - 70, BY + SQ * 8 - 96, 140, 36)
 
-# ── main app ────────────────────────────────────────────────────────────────
+    def _r_menu(self):
+        return pygame.Rect(SBX + SBW // 2 - 70, BY + SQ * 8 - 52, 140, 36)
 
-class App(ctk.CTk):
-    def __init__(self):
-        super().__init__()
-        self.title("Xadrez")
-        self.resizable(False, False)
-        self.configure(fg_color=C["bg"])
-        self.geometry(f"{12 + CW + 12 + 170 + 12}x{12 + CH + 12}")  # 746x564
+    def _promo_rects(self):
+        bsz  = 82
+        gap  = 8
+        pw   = 4 * bsz + 3 * gap + 32
+        px   = (WIN_W - pw) // 2
+        py   = (WIN_H - 148) // 2
+        bx0  = px + 16
+        by0  = py + 46
+        return {pt: pygame.Rect(bx0 + i * (bsz + gap), by0, bsz, bsz)
+                for i, pt in enumerate(['Q', 'R', 'B', 'N'])}
 
-        self._menu = MenuFrame(self, self._start)
-        self._game = GameFrame(self, self._to_menu)
-        self._to_menu()
+    # ── drawing ───────────────────────────────────────────────────────────
+    def _draw(self, mouse):
+        if self.state == "menu":
+            self._draw_menu(mouse)
+        else:
+            self._draw_board()
+            self._draw_sidebar(mouse)
+            if self.promoting:
+                self._draw_promo(mouse)
 
-    def _to_menu(self):
-        self._game.pack_forget()
-        self._menu.pack(fill="both", expand=True)
+    def _draw_menu(self, mouse):
+        t = self.tf.render("Xadrez", True, C["fg"])
+        self.screen.blit(t, t.get_rect(center=(WIN_W // 2, WIN_H // 2 - 60)))
 
-    def _start(self):
-        self._menu.pack_forget()
-        self._game.start_new()
-        self._game.pack(fill="both", expand=True)
+        dec = self.sf.render("♜ ♞ ♝ ♛ ♚ ♝ ♞ ♜", True, (55, 62, 75))
+        self.screen.blit(dec, dec.get_rect(center=(WIN_W // 2, WIN_H // 2 - 12)))
+
+        sub = self.uf.render("dois jogadores  •  local", True, C["hint"])
+        self.screen.blit(sub, sub.get_rect(center=(WIN_W // 2, WIN_H // 2 + 14)))
+
+        self._btn(self._r_start(), "▶  Iniciar Partida", mouse,
+                  C["red"], C["red_hov"], bold=True, radius=26)
+
+    def _draw_board(self):
+        g        = self.game
+        st       = self._status
+        last_sqs = set(g.last_move) if g.last_move else set()
+
+        # Squares
+        for r in range(8):
+            for c in range(8):
+                color = C["light"] if (r + c) % 2 == 0 else C["dark"]
+                if (r, c) in last_sqs:
+                    color = C["last"]
+                pygame.draw.rect(self.screen, color,
+                                 (BX + c * SQ, BY + r * SQ, SQ, SQ))
+
+        # Selected
+        if self.selected:
+            r, c = self.selected
+            pygame.draw.rect(self.screen, C["sel"],
+                             (BX + c * SQ, BY + r * SQ, SQ, SQ))
+
+        # King in check
+        if st in ('check', 'checkmate'):
+            kp = g._king_pos(g.turn)
+            if kp:
+                r, c = kp
+                pygame.draw.rect(self.screen, C["check_sq"],
+                                 (BX + c * SQ, BY + r * SQ, SQ, SQ))
+
+        # Valid-move indicators
+        for r, c in self.valid:
+            cx_ = BX + c * SQ + SQ // 2
+            cy_ = BY + r * SQ + SQ // 2
+            if g.board[r][c]:
+                pygame.draw.circle(self.screen, C["sel"], (cx_, cy_), SQ // 2 - 3, 4)
+            else:
+                pygame.draw.circle(self.screen, C["sel"], (cx_, cy_), 9)
+
+        # Pieces (shadow + fill)
+        for r in range(8):
+            for c in range(8):
+                p = g.board[r][c]
+                if not p:
+                    continue
+                cx_ = BX + c * SQ + SQ // 2
+                cy_ = BY + r * SQ + SQ // 2
+                fill = (255, 255, 255) if p[0] == 'w' else (17,  17,  17)
+                shd  = (68,  68,  68)  if p[0] == 'w' else (153, 153, 153)
+                for dx, dy, col in ((1, 2, shd), (0, 0, fill)):
+                    s = self.pf.render(SYMS[p], True, col)
+                    self.screen.blit(s, s.get_rect(center=(cx_ + dx, cy_ + dy)))
+
+        # Coordinate labels (inside squares)
+        for c, ltr in enumerate("abcdefgh"):
+            col = C["light"] if c % 2 == 0 else C["dark"]
+            s   = self.lf.render(ltr, True, col)
+            self.screen.blit(s, (BX + (c + 1) * SQ - s.get_width() - 3,
+                                 BY + 7 * SQ + SQ - s.get_height() - 3))
+        for r in range(8):
+            col = C["dark"] if r % 2 == 0 else C["light"]
+            s   = self.lf.render(str(8 - r), True, col)
+            self.screen.blit(s, (BX + 3, BY + r * SQ + 3))
+
+    def _draw_sidebar(self, mouse):
+        pygame.draw.rect(self.screen, C["sidebar"],
+                         (SBX, BY, SBW, SQ * 8), border_radius=12)
+        cx = SBX + SBW // 2
+        g  = self.game
+
+        t = self.ub.render("Xadrez", True, C["fg"])
+        self.screen.blit(t, t.get_rect(center=(cx, BY + 28)))
+
+        # Turn: symbol + name side by side
+        sym_s  = self.sf.render("♔" if g.turn == 'w' else "♚", True, C["fg"])
+        name_s = self.uf.render("Brancas" if g.turn == 'w' else "Pretas", True, C["fg"])
+        total  = sym_s.get_width() + 6 + name_s.get_width()
+        bx     = cx - total // 2
+        mid    = BY + 60
+        self.screen.blit(sym_s,  (bx, mid - sym_s.get_height() // 2))
+        self.screen.blit(name_s, (bx + sym_s.get_width() + 6,
+                                  mid - name_s.get_height() // 2))
+
+        # Status
+        st_map = {
+            'check':     ("Xeque!",      C["red"]),
+            'checkmate': ("Xeque-mate!", C["red"]),
+            'stalemate': ("Empate",      C["hint"]),
+        }
+        if self._status in st_map:
+            txt, clr = st_map[self._status]
+            s = self.ub.render(txt, True, clr)
+            self.screen.blit(s, s.get_rect(center=(cx, BY + 84)))
+
+        self._btn(self._r_new(),  "⟳  Nova Partida", mouse, C["neu"], C["neu_hov"])
+        self._btn(self._r_menu(), "←  Menu",          mouse, C["neu"], C["neu_hov"])
+
+    def _draw_promo(self, mouse):
+        ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 170))
+        self.screen.blit(ov, (0, 0))
+
+        rects = self._promo_rects()
+        bsz   = 82
+        gap   = 8
+        pw    = 4 * bsz + 3 * gap + 32
+        ph    = 148
+        px    = (WIN_W - pw) // 2
+        py    = (WIN_H - ph) // 2
+
+        pygame.draw.rect(self.screen, C["sidebar"], (px, py, pw, ph), border_radius=12)
+
+        t = self.ub.render("Promover peão para:", True, C["fg"])
+        self.screen.blit(t, t.get_rect(center=(px + pw // 2, py + 18)))
+
+        color  = self.game.board[self.promoting[0]][self.promoting[1]][0]
+        labels = {'Q': 'Dama', 'R': 'Torre', 'B': 'Bispo', 'N': 'Cavalo'}
+        for pt, rect in rects.items():
+            pygame.draw.rect(self.screen,
+                             C["neu_hov"] if rect.collidepoint(mouse) else C["neu"],
+                             rect, border_radius=8)
+            fill  = (255, 255, 255) if color == 'w' else (17, 17, 17)
+            sym_s = self.pf.render(SYMS[(color, pt)], True, fill)
+            self.screen.blit(sym_s, sym_s.get_rect(center=(rect.centerx, rect.centery - 8)))
+            lbl_s = self.lf.render(labels[pt], True, C["hint"])
+            self.screen.blit(lbl_s, lbl_s.get_rect(center=(rect.centerx, rect.bottom - 10)))
+
+    def _btn(self, rect, text, mouse, bg, bg_hov, bold=False, radius=8):
+        pygame.draw.rect(self.screen,
+                         bg_hov if rect.collidepoint(mouse) else bg,
+                         rect, border_radius=radius)
+        s = (self.ub if bold else self.uf).render(text, True, C["fg"])
+        self.screen.blit(s, s.get_rect(center=rect.center))
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    App().run()
