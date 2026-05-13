@@ -4,7 +4,7 @@ AppVersion=1.0
 AppPublisher=Leo
 DefaultDirName={autopf}\Xadrez
 DefaultGroupName=Xadrez
-OutputDir=..\dist
+OutputDir=dist_installer
 OutputBaseFilename=Xadrez_Setup
 Compression=lzma2
 SolidCompression=yes
@@ -15,10 +15,10 @@ PrivilegesRequired=lowest
 Name: "portuguese"; MessagesFile: "compiler:Languages\Portuguese.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Criar atalho na &Área de Trabalho"; GroupDescription: "Ícones adicionais:"; Flags: checked
+Name: "desktopicon"; Description: "Criar atalho na &Área de Trabalho"; GroupDescription: "Ícones adicionais:"
 
 [Files]
-Source: "..\dist\Xadrez\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\Xadrez\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Xadrez"; Filename: "{app}\Xadrez.exe"
