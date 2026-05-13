@@ -1,13 +1,17 @@
 import sys
+import random
+import threading
+
+import chess
 import pygame
 
 pygame.init()
 
 # ── layout ──────────────────────────────────────────────────────────────────
 SQ    = 64
-BX, BY = 16, 16                  # board top-left
+BX, BY = 16, 16
 SBX   = BX + SQ * 8 + 16        # sidebar left  (= 544)
-SBW   = 180                      # sidebar width
+SBW   = 180
 WIN_W = SBX + SBW + 12          # 736
 WIN_H = BY + SQ * 8 + BY        # 544
 
@@ -26,13 +30,18 @@ C = {
     "red_hov":  (192, 57,  43),
     "neu":      (30,  34,  42),
     "neu_hov":  (46,  51,  64),
+    "gold":     (255, 200,  50),
+    "green":    (46,  160,  67),
+    "green_hov":(34,  120,  50),
 }
 
 SYMS = {
-    ('w','K'):'♔', ('w','Q'):'♕', ('w','R'):'♖',
-    ('w','B'):'♗', ('w','N'):'♘', ('w','P'):'♙',
-    ('b','K'):'♚', ('b','Q'):'♛', ('b','R'):'♜',
-    ('b','B'):'♝', ('b','N'):'♞', ('b','P'):'♟',
+    (chess.WHITE, chess.KING):   "♔", (chess.WHITE, chess.QUEEN):  "♕",
+    (chess.WHITE, chess.ROOK):   "♖", (chess.WHITE, chess.BISHOP): "♗",
+    (chess.WHITE, chess.KNIGHT): "♘", (chess.WHITE, chess.PAWN):   "♙",
+    (chess.BLACK, chess.KING):   "♚", (chess.BLACK, chess.QUEEN):  "♛",
+    (chess.BLACK, chess.ROOK):   "♜", (chess.BLACK, chess.BISHOP): "♝",
+    (chess.BLACK, chess.KNIGHT): "♞", (chess.BLACK, chess.PAWN):   "♟",
 }
 
 
@@ -47,226 +56,135 @@ def _font(names, size, bold=False):
     return pygame.font.Font(None, size)
 
 
-# ── chess logic ──────────────────────────────────────────────────────────────
+# ── AI: negamax + alpha-beta + piece-square tables ───────────────────────────
 
-class ChessGame:
-    def __init__(self):
-        self.reset()
+PIECE_VAL = {
+    chess.PAWN: 100, chess.KNIGHT: 320, chess.BISHOP: 330,
+    chess.ROOK: 500, chess.QUEEN:  900, chess.KING:     0,
+}
 
-    def reset(self):
-        self.board = self._init_board()
-        self.turn = 'w'
-        self.en_passant = None
-        self.castling = {'w': {'K': True, 'Q': True}, 'b': {'K': True, 'Q': True}}
-        self.last_move = None
+# Indexed a1=0 … h8=63  (rank-1 first, matches python-chess square numbers)
+PAWN_PST = (
+     0,  0,  0,  0,  0,  0,  0,  0,
+     5, 10, 10,-20,-20, 10, 10,  5,
+     5, -5,-10,  0,  0,-10, -5,  5,
+     0,  0,  0, 20, 20,  0,  0,  0,
+     5,  5, 10, 25, 25, 10,  5,  5,
+    10, 10, 20, 30, 30, 20, 10, 10,
+    50, 50, 50, 50, 50, 50, 50, 50,
+     0,  0,  0,  0,  0,  0,  0,  0,
+)
+KNIGHT_PST = (
+    -50,-40,-30,-30,-30,-30,-40,-50,
+    -40,-20,  0,  0,  0,  0,-20,-40,
+    -30,  0, 10, 15, 15, 10,  0,-30,
+    -30,  5, 15, 20, 20, 15,  5,-30,
+    -30,  0, 15, 20, 20, 15,  0,-30,
+    -30,  5, 10, 15, 15, 10,  5,-30,
+    -40,-20,  0,  5,  5,  0,-20,-40,
+    -50,-40,-30,-30,-30,-30,-40,-50,
+)
+BISHOP_PST = (
+    -20,-10,-10,-10,-10,-10,-10,-20,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -10,  0,  5, 10, 10,  5,  0,-10,
+    -10,  5,  5, 10, 10,  5,  5,-10,
+    -10,  0, 10, 10, 10, 10,  0,-10,
+    -10, 10, 10, 10, 10, 10, 10,-10,
+    -10,  5,  0,  0,  0,  0,  5,-10,
+    -20,-10,-10,-10,-10,-10,-10,-20,
+)
+ROOK_PST = (
+     0,  0,  0,  5,  5,  0,  0,  0,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+     5, 10, 10, 10, 10, 10, 10,  5,
+     0,  0,  0,  0,  0,  0,  0,  0,
+)
+QUEEN_PST = (
+    -20,-10,-10, -5, -5,-10,-10,-20,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -10,  0,  5,  5,  5,  5,  0,-10,
+     -5,  0,  5,  5,  5,  5,  0, -5,
+      0,  0,  5,  5,  5,  5,  0, -5,
+    -10,  5,  5,  5,  5,  5,  0,-10,
+    -10,  0,  5,  0,  0,  0,  0,-10,
+    -20,-10,-10, -5, -5,-10,-10,-20,
+)
+KING_PST = (
+     20, 30, 10,  0,  0, 10, 30, 20,
+     20, 20,  0,  0,  0,  0, 20, 20,
+    -10,-20,-20,-20,-20,-20,-20,-10,
+    -20,-30,-30,-40,-40,-30,-30,-20,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+)
+_PST = {
+    chess.PAWN: PAWN_PST, chess.KNIGHT: KNIGHT_PST, chess.BISHOP: BISHOP_PST,
+    chess.ROOK: ROOK_PST, chess.QUEEN:  QUEEN_PST,  chess.KING:   KING_PST,
+}
 
-    def _init_board(self):
-        b = [[None] * 8 for _ in range(8)]
-        for c, t in enumerate('RNBQKBNR'):
-            b[0][c] = ('b', t)
-            b[7][c] = ('w', t)
-        for c in range(8):
-            b[1][c] = ('b', 'P')
-            b[6][c] = ('w', 'P')
-        return b
 
-    def _opp(self, color):
-        return 'b' if color == 'w' else 'w'
+def _pst(pt, sq, color):
+    t = _PST[pt]
+    return t[sq] if color == chess.WHITE else t[chess.square_mirror(sq)]
 
-    def _king_pos(self, color, board=None):
-        if board is None:
-            board = self.board
-        for r in range(8):
-            for c in range(8):
-                p = board[r][c]
-                if p and p[0] == color and p[1] == 'K':
-                    return (r, c)
+
+def _evaluate(board):
+    score = 0
+    for pt, val in PIECE_VAL.items():
+        for sq in board.pieces(pt, chess.WHITE):
+            score += val + _pst(pt, sq, chess.WHITE)
+        for sq in board.pieces(pt, chess.BLACK):
+            score -= val + _pst(pt, sq, chess.BLACK)
+    return score if board.turn == chess.WHITE else -score
+
+
+def _order(board):
+    caps, rest = [], []
+    for m in board.legal_moves:
+        (caps if board.is_capture(m) else rest).append(m)
+    return caps + rest
+
+
+def _negamax(board, depth, alpha, beta):
+    if board.is_game_over():
+        return -30000 if board.is_checkmate() else 0
+    if depth == 0:
+        return _evaluate(board)
+    best = -32000
+    for m in _order(board):
+        board.push(m)
+        val = -_negamax(board, depth - 1, -beta, -alpha)
+        board.pop()
+        if val > best:
+            best = val
+        alpha = max(alpha, val)
+        if alpha >= beta:
+            break
+    return best
+
+
+def compute_ai_move(board, difficulty):
+    moves = list(board.legal_moves)
+    if not moves:
         return None
-
-    def _pawn_attacks(self, row, col, color):
-        d = -1 if color == 'w' else 1
-        nr = row + d
-        if not (0 <= nr < 8):
-            return []
-        return [(nr, col + dc) for dc in (-1, 1) if 0 <= col + dc < 8]
-
-    def _pseudo_moves(self, row, col, board=None):
-        if board is None:
-            board = self.board
-        p = board[row][col]
-        if p is None:
-            return []
-        color, pt = p
-        moves = []
-
-        if pt == 'P':
-            d = -1 if color == 'w' else 1
-            nr = row + d
-            if 0 <= nr < 8 and board[nr][col] is None:
-                moves.append((nr, col))
-                start = 6 if color == 'w' else 1
-                if row == start and board[row + 2 * d][col] is None:
-                    moves.append((row + 2 * d, col))
-            for dc in (-1, 1):
-                nc = col + dc
-                if 0 <= nr < 8 and 0 <= nc < 8:
-                    tgt = board[nr][nc]
-                    if (tgt and tgt[0] != color) or (nr, nc) == self.en_passant:
-                        moves.append((nr, nc))
-
-        elif pt == 'N':
-            for dr, dc in ((-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)):
-                nr, nc = row + dr, col + dc
-                if 0 <= nr < 8 and 0 <= nc < 8:
-                    tgt = board[nr][nc]
-                    if tgt is None or tgt[0] != color:
-                        moves.append((nr, nc))
-
-        elif pt in ('B', 'R', 'Q'):
-            dirs = []
-            if pt in ('B', 'Q'): dirs += [(-1,-1),(-1,1),(1,-1),(1,1)]
-            if pt in ('R', 'Q'): dirs += [(-1,0),(1,0),(0,-1),(0,1)]
-            for dr, dc in dirs:
-                nr, nc = row + dr, col + dc
-                while 0 <= nr < 8 and 0 <= nc < 8:
-                    tgt = board[nr][nc]
-                    if tgt is None:
-                        moves.append((nr, nc))
-                    elif tgt[0] != color:
-                        moves.append((nr, nc))
-                        break
-                    else:
-                        break
-                    nr += dr
-                    nc += dc
-
-        elif pt == 'K':
-            for dr in (-1, 0, 1):
-                for dc in (-1, 0, 1):
-                    if dr == 0 and dc == 0:
-                        continue
-                    nr, nc = row + dr, col + dc
-                    if 0 <= nr < 8 and 0 <= nc < 8:
-                        tgt = board[nr][nc]
-                        if tgt is None or tgt[0] != color:
-                            moves.append((nr, nc))
-
-        return moves
-
-    def _attacked(self, row, col, by, board=None):
-        if board is None:
-            board = self.board
-        for r in range(8):
-            for c in range(8):
-                p = board[r][c]
-                if p is None or p[0] != by:
-                    continue
-                color, pt = p
-                if pt == 'P':
-                    if (row, col) in self._pawn_attacks(r, c, color):
-                        return True
-                elif (row, col) in self._pseudo_moves(r, c, board):
-                    return True
-        return False
-
-    def in_check(self, color, board=None):
-        kp = self._king_pos(color, board)
-        return kp is not None and self._attacked(kp[0], kp[1], self._opp(color), board)
-
-    def legal_moves(self, row, col):
-        p = self.board[row][col]
-        if p is None or p[0] != self.turn:
-            return []
-        color, pt = p
-        result = []
-        for nr, nc in self._pseudo_moves(row, col):
-            tmp = [r[:] for r in self.board]
-            if pt == 'P' and (nr, nc) == self.en_passant:
-                tmp[row][nc] = None
-            tmp[nr][nc] = tmp[row][col]
-            tmp[row][col] = None
-            if not self.in_check(color, tmp):
-                result.append((nr, nc))
-        if pt == 'K':
-            result += self._castling_moves(color)
-        return result
-
-    def _castling_moves(self, color):
-        moves = []
-        rank = 7 if color == 'w' else 0
-        opp  = self._opp(color)
-        if self.castling[color]['K']:
-            if (self.board[rank][5] is None and self.board[rank][6] is None
-                    and self.board[rank][7] == (color, 'R')
-                    and not self._attacked(rank, 4, opp)
-                    and not self._attacked(rank, 5, opp)
-                    and not self._attacked(rank, 6, opp)):
-                moves.append((rank, 6))
-        if self.castling[color]['Q']:
-            if (self.board[rank][3] is None and self.board[rank][2] is None
-                    and self.board[rank][1] is None
-                    and self.board[rank][0] == (color, 'R')
-                    and not self._attacked(rank, 4, opp)
-                    and not self._attacked(rank, 3, opp)
-                    and not self._attacked(rank, 2, opp)):
-                moves.append((rank, 2))
-        return moves
-
-    def make_move(self, fr, fc, tr, tc):
-        """Returns ('promo', (r,c)) or ('ok', None)."""
-        p = self.board[fr][fc]
-        color, pt = p
-
-        if pt == 'K':
-            self.castling[color] = {'K': False, 'Q': False}
-        if pt == 'R':
-            rank = 7 if color == 'w' else 0
-            if fr == rank and fc == 0: self.castling[color]['Q'] = False
-            if fr == rank and fc == 7: self.castling[color]['K'] = False
-        opp_rank = 0 if color == 'w' else 7
-        if (tr, tc) == (opp_rank, 0): self.castling[self._opp(color)]['Q'] = False
-        if (tr, tc) == (opp_rank, 7): self.castling[self._opp(color)]['K'] = False
-
-        if pt == 'P' and (tr, tc) == self.en_passant:
-            self.board[fr][tc] = None
-
-        if pt == 'K' and fc == 4:
-            rank = 7 if color == 'w' else 0
-            if tc == 6:
-                self.board[rank][5] = self.board[rank][7]
-                self.board[rank][7] = None
-            elif tc == 2:
-                self.board[rank][3] = self.board[rank][0]
-                self.board[rank][0] = None
-
-        self.en_passant = None
-        if pt == 'P' and abs(tr - fr) == 2:
-            self.en_passant = ((fr + tr) // 2, fc)
-
-        self.board[tr][tc] = p
-        self.board[fr][fc] = None
-        self.last_move = ((fr, fc), (tr, tc))
-
-        if pt == 'P' and (tr == 0 or tr == 7):
-            return 'promo', (tr, tc)
-
-        self.turn = self._opp(color)
-        return 'ok', None
-
-    def finish_promotion(self, row, col, piece_type):
-        color = self.board[row][col][0]
-        self.board[row][col] = (color, piece_type)
-        self.turn = self._opp(color)
-
-    def status(self):
-        color = self.turn
-        chk   = self.in_check(color)
-        for r in range(8):
-            for c in range(8):
-                p = self.board[r][c]
-                if p and p[0] == color and self.legal_moves(r, c):
-                    return 'check' if chk else 'playing'
-        return 'checkmate' if chk else 'stalemate'
+    if difficulty == "easy":
+        return random.choice(moves)
+    depth = 2 if difficulty == "medium" else 4
+    best_move, best_val = None, -32000
+    for m in _order(board):
+        board.push(m)
+        val = -_negamax(board, depth - 1, -32000, 32000)
+        board.pop()
+        if val > best_val:
+            best_val, best_move = val, m
+    return best_move or random.choice(moves)
 
 
 # ── app ──────────────────────────────────────────────────────────────────────
@@ -277,21 +195,30 @@ class App:
         pygame.display.set_caption("Xadrez")
         self.clock = pygame.time.Clock()
 
-        chess_names = ["segoeuisymbol", "seguisymbol", "arialunicodems", "notosanssymbols2"]
-        ui_names    = ["segoui", "segoeui", "calibri", "arial", "helvetica"]
-        self.pf = _font(chess_names, 42)          # piece symbols (large)
-        self.sf = _font(chess_names, 18)          # piece symbols (small, sidebar)
-        self.uf = _font(ui_names,    14)          # UI text
-        self.ub = _font(ui_names,    14, True)    # UI text bold
-        self.lf = _font(ui_names,    11)          # board coordinate labels
-        self.tf = _font(ui_names,    52, True)    # menu title
+        chess_names = ["segoeuisymbol", "seguisymbol", "arialunicodems"]
+        ui_names    = ["segoui", "segoeui", "calibri", "arial"]
+        self.pf = _font(chess_names, 42)
+        self.sf = _font(chess_names, 18)
+        self.uf = _font(ui_names, 14)
+        self.ub = _font(ui_names, 14, True)
+        self.lf = _font(ui_names, 11)
+        self.tf = _font(ui_names, 52, True)
 
-        self.state     = "menu"
-        self.game      = ChessGame()
-        self.selected  = None
-        self.valid     = []
-        self.promoting = None        # (row, col) while waiting for promo choice
-        self._status   = 'playing'  # cached — updated after every move
+        self.state      = "menu"    # "menu" | "difficulty" | "game"
+        self.mode       = "pvp"     # "pvp" | "cpu"
+        self.difficulty = "medium"  # "easy" | "medium" | "hard"
+        self.player_col = chess.WHITE
+
+        self.board       = chess.Board()
+        self.sel_sq      = None     # selected chess.Square
+        self.valid_sqs   = []       # valid destination squares
+        self.promoting   = None     # to-square while awaiting promo choice
+        self._promo_from = None     # from-square of promoting pawn
+        self._status     = "playing"
+
+        self._ai_move      = None
+        self._ai_thinking  = False
+        self._ai_gen       = 0      # increments on new game; prevents stale moves
 
     # ── main loop ─────────────────────────────────────────────────────────
     def run(self):
@@ -302,6 +229,19 @@ class App:
                     pygame.quit()
                     sys.exit()
                 self._handle(event, mouse)
+
+            # Apply ready AI move
+            if self.state == "game" and self._ai_move is not None and not self._ai_thinking:
+                self._apply_move(self._ai_move)
+                self._ai_move = None
+
+            # Trigger AI if it's CPU's turn
+            if (self.state == "game" and self.mode == "cpu"
+                    and self.board.turn != self.player_col
+                    and not self._ai_thinking and self._ai_move is None
+                    and not self.board.is_game_over() and self.promoting is None):
+                self._start_ai()
+
             self.screen.fill(C["bg"])
             self._draw(mouse)
             pygame.display.flip()
@@ -312,93 +252,163 @@ class App:
         click = event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
 
         if self.state == "menu":
-            if click and self._r_start().collidepoint(mouse):
+            if click and self._r("pvp").collidepoint(mouse):
+                self.mode = "pvp"
                 self._new_game()
-            return
+            elif click and self._r("cpu").collidepoint(mouse):
+                self.mode = "cpu"
+                self.state = "difficulty"
 
-        # game state
-        if self.promoting:
-            if click:
-                for pt, rect in self._promo_rects().items():
-                    if rect.collidepoint(mouse):
-                        self.game.finish_promotion(*self.promoting, pt)
-                        self.promoting = None
-                        self._status = self.game.status()
-                        break
-            return
+        elif self.state == "difficulty":
+            for diff in ("easy", "medium", "hard"):
+                if click and self._r(diff).collidepoint(mouse):
+                    self.difficulty = diff
+                    self._new_game()
+                    return
+            if click and self._r("back").collidepoint(mouse):
+                self.state = "menu"
 
-        if click and self._r_new().collidepoint(mouse):
-            self._new_game()
-        elif click and self._r_menu().collidepoint(mouse):
-            self.state = "menu"
-        elif click:
-            self._board_click(mouse)
+        elif self.state == "game":
+            if self.promoting:
+                if click:
+                    for pt, rect in self._promo_rects().items():
+                        if rect.collidepoint(mouse):
+                            self.board.push(chess.Move(self._promo_from, self.promoting,
+                                                       promotion=pt))
+                            self.promoting = self._promo_from = None
+                            self._status = self._get_status()
+                            break
+                return
+
+            if click and self._r("new").collidepoint(mouse):
+                self._new_game()
+                return
+            if click and self._r("menu_btn").collidepoint(mouse):
+                self.state = "menu"
+                return
+
+            # Board click only on human's turn
+            cpu_turn = self.mode == "cpu" and self.board.turn != self.player_col
+            if click and not cpu_turn and not self._ai_thinking:
+                self._board_click(mouse)
 
     def _new_game(self):
-        self.game.reset()
-        self.selected  = None
-        self.valid     = []
-        self.promoting = None
-        self._status   = 'playing'
-        self.state     = "game"
+        self._ai_gen += 1
+        self.board.reset()
+        self.sel_sq = self.valid_sqs = None
+        self.valid_sqs   = []
+        self.promoting   = self._promo_from = None
+        self._status     = "playing"
+        self._ai_move    = None
+        self._ai_thinking = False
+        self.state       = "game"
 
     def _board_click(self, mouse):
-        if self._status in ('checkmate', 'stalemate'):
+        if self._status in ("checkmate", "stalemate", "draw"):
             return
         col = (mouse[0] - BX) // SQ
         row = (mouse[1] - BY) // SQ
         if not (0 <= row < 8 and 0 <= col < 8):
             return
-        g = self.game
-        p = g.board[row][col]
+        sq    = chess.square(col, 7 - row)
+        piece = self.board.piece_at(sq)
 
-        if self.selected:
-            if (row, col) in self.valid:
-                result, extra = g.make_move(*self.selected, row, col)
-                self.selected = None
-                self.valid    = []
-                if result == 'promo':
-                    self.promoting = extra
-                else:
-                    self._status = g.status()
+        if self.sel_sq is not None:
+            if sq in self.valid_sqs:
+                self._try_move(self.sel_sq, sq)
+                self.sel_sq = None
+                self.valid_sqs = []
                 return
-            if p and p[0] == g.turn:
-                self.selected = (row, col)
-                self.valid    = g.legal_moves(row, col)
+            if piece and piece.color == self.board.turn:
+                self.sel_sq    = sq
+                self.valid_sqs = self._legal_tos(sq)
                 return
-            self.selected = None
-            self.valid    = []
+            self.sel_sq = None
+            self.valid_sqs = []
             return
 
-        if p and p[0] == g.turn:
-            self.selected = (row, col)
-            self.valid    = g.legal_moves(row, col)
+        if piece and piece.color == self.board.turn:
+            self.sel_sq    = sq
+            self.valid_sqs = self._legal_tos(sq)
+
+    def _legal_tos(self, from_sq):
+        seen, result = set(), []
+        for m in self.board.legal_moves:
+            if m.from_square == from_sq and m.to_square not in seen:
+                seen.add(m.to_square)
+                result.append(m.to_square)
+        return result
+
+    def _try_move(self, from_sq, to_sq):
+        p = self.board.piece_at(from_sq)
+        if p and p.piece_type == chess.PAWN and chess.square_rank(to_sq) in (0, 7):
+            self.promoting   = to_sq
+            self._promo_from = from_sq
+        else:
+            self._apply_move(chess.Move(from_sq, to_sq))
+
+    def _apply_move(self, move):
+        self.board.push(move)
+        self.sel_sq    = None
+        self.valid_sqs = []
+        self._status   = self._get_status()
+
+    def _get_status(self):
+        if self.board.is_checkmate():             return "checkmate"
+        if self.board.is_stalemate():             return "stalemate"
+        if self.board.is_insufficient_material(): return "draw"
+        if self.board.is_check():                 return "check"
+        return "playing"
+
+    # ── AI ────────────────────────────────────────────────────────────────
+    def _start_ai(self):
+        self._ai_thinking = True
+        board_copy = self.board.copy()
+        diff       = self.difficulty
+        gen        = self._ai_gen
+
+        def think():
+            move = compute_ai_move(board_copy, diff)
+            if self._ai_gen == gen:
+                self._ai_move = move
+            self._ai_thinking = False
+
+        threading.Thread(target=think, daemon=True).start()
 
     # ── button rects ──────────────────────────────────────────────────────
-    def _r_start(self):
-        return pygame.Rect(WIN_W // 2 - 100, WIN_H // 2 + 10, 200, 52)
-
-    def _r_new(self):
-        return pygame.Rect(SBX + SBW // 2 - 70, BY + SQ * 8 - 96, 140, 36)
-
-    def _r_menu(self):
-        return pygame.Rect(SBX + SBW // 2 - 70, BY + SQ * 8 - 52, 140, 36)
+    def _r(self, name):
+        cx    = WIN_W // 2
+        sb_cx = SBX + SBW // 2
+        table = {
+            # menu
+            "pvp":      (cx - 130, WIN_H // 2 - 20, 260, 50),
+            "cpu":      (cx - 130, WIN_H // 2 + 40, 260, 50),
+            # difficulty
+            "easy":     (cx - 110, WIN_H // 2 - 58, 220, 44),
+            "medium":   (cx - 110, WIN_H // 2 -  4, 220, 44),
+            "hard":     (cx - 110, WIN_H // 2 + 50, 220, 44),
+            "back":     (cx - 110, WIN_H // 2 + 116, 220, 36),
+            # game sidebar
+            "new":      (sb_cx - 70, BY + SQ * 8 - 96, 140, 36),
+            "menu_btn": (sb_cx - 70, BY + SQ * 8 - 52, 140, 36),
+        }
+        return pygame.Rect(table[name])
 
     def _promo_rects(self):
-        bsz  = 82
-        gap  = 8
-        pw   = 4 * bsz + 3 * gap + 32
-        px   = (WIN_W - pw) // 2
-        py   = (WIN_H - 148) // 2
-        bx0  = px + 16
-        by0  = py + 46
-        return {pt: pygame.Rect(bx0 + i * (bsz + gap), by0, bsz, bsz)
-                for i, pt in enumerate(['Q', 'R', 'B', 'N'])}
+        bsz, gap = 82, 8
+        pw  = 4 * bsz + 3 * gap + 32
+        px  = (WIN_W - pw) // 2
+        py  = (WIN_H - 148) // 2
+        return {pt: pygame.Rect(px + 16 + i * (bsz + gap), py + 46, bsz, bsz)
+                for i, pt in enumerate([chess.QUEEN, chess.ROOK,
+                                        chess.BISHOP, chess.KNIGHT])}
 
     # ── drawing ───────────────────────────────────────────────────────────
     def _draw(self, mouse):
         if self.state == "menu":
             self._draw_menu(mouse)
+        elif self.state == "difficulty":
+            self._draw_difficulty(mouse)
         else:
             self._draw_board()
             self._draw_sidebar(mouse)
@@ -407,69 +417,91 @@ class App:
 
     def _draw_menu(self, mouse):
         t = self.tf.render("Xadrez", True, C["fg"])
-        self.screen.blit(t, t.get_rect(center=(WIN_W // 2, WIN_H // 2 - 60)))
+        self.screen.blit(t, t.get_rect(center=(WIN_W // 2, WIN_H // 2 - 82)))
 
         dec = self.sf.render("♜ ♞ ♝ ♛ ♚ ♝ ♞ ♜", True, (55, 62, 75))
-        self.screen.blit(dec, dec.get_rect(center=(WIN_W // 2, WIN_H // 2 - 12)))
+        self.screen.blit(dec, dec.get_rect(center=(WIN_W // 2, WIN_H // 2 - 36)))
 
-        sub = self.uf.render("dois jogadores  •  local", True, C["hint"])
-        self.screen.blit(sub, sub.get_rect(center=(WIN_W // 2, WIN_H // 2 + 14)))
+        sub = self.lf.render("escolha o modo de jogo", True, C["hint"])
+        self.screen.blit(sub, sub.get_rect(center=(WIN_W // 2, WIN_H // 2 - 8)))
 
-        self._btn(self._r_start(), "▶  Iniciar Partida", mouse,
-                  C["red"], C["red_hov"], bold=True, radius=26)
+        self._btn(self._r("pvp"), "Jogador vs Jogador", mouse, C["neu"], C["neu_hov"])
+        self._btn(self._r("cpu"), "Jogador vs CPU",     mouse, C["red"], C["red_hov"])
+
+    def _draw_difficulty(self, mouse):
+        t = self.ub.render("Escolha a dificuldade", True, C["fg"])
+        self.screen.blit(t, t.get_rect(center=(WIN_W // 2, WIN_H // 2 - 96)))
+
+        sub = self.lf.render("voce joga com as Brancas", True, C["hint"])
+        self.screen.blit(sub, sub.get_rect(center=(WIN_W // 2, WIN_H // 2 - 76)))
+
+        diff_cfg = [
+            ("easy",   "Facil",   "movimentos aleatorios"),
+            ("medium", "Medio",   "minimax profundidade 2"),
+            ("hard",   "Dificil", "minimax profundidade 4"),
+        ]
+        for key, label, desc in diff_cfg:
+            r = self._r(key)
+            hov = r.collidepoint(mouse)
+            pygame.draw.rect(self.screen, C["neu_hov"] if hov else C["neu"],
+                             r, border_radius=8)
+            ls = self.ub.render(label, True, C["fg"])
+            ds = self.lf.render(desc,  True, C["hint"])
+            self.screen.blit(ls, ls.get_rect(midleft=(r.x + 16, r.centery - 7)))
+            self.screen.blit(ds, ds.get_rect(midleft=(r.x + 16, r.centery + 9)))
+
+        self._btn(self._r("back"), "< Voltar", mouse, C["neu"], C["neu_hov"])
 
     def _draw_board(self):
-        g        = self.game
-        st       = self._status
-        last_sqs = set(g.last_move) if g.last_move else set()
+        board    = self.board
+        last     = board.peek() if board.move_stack else None
+        last_sqs = {last.from_square, last.to_square} if last else set()
 
-        # Squares
         for r in range(8):
             for c in range(8):
+                sq    = chess.square(c, 7 - r)
                 color = C["light"] if (r + c) % 2 == 0 else C["dark"]
-                if (r, c) in last_sqs:
+                if sq in last_sqs:
                     color = C["last"]
-                pygame.draw.rect(self.screen, color,
-                                 (BX + c * SQ, BY + r * SQ, SQ, SQ))
+                pygame.draw.rect(self.screen, color, (BX + c * SQ, BY + r * SQ, SQ, SQ))
 
-        # Selected
-        if self.selected:
-            r, c = self.selected
-            pygame.draw.rect(self.screen, C["sel"],
-                             (BX + c * SQ, BY + r * SQ, SQ, SQ))
+        if self.sel_sq is not None:
+            c = chess.square_file(self.sel_sq)
+            r = 7 - chess.square_rank(self.sel_sq)
+            pygame.draw.rect(self.screen, C["sel"], (BX + c * SQ, BY + r * SQ, SQ, SQ))
 
-        # King in check
-        if st in ('check', 'checkmate'):
-            kp = g._king_pos(g.turn)
-            if kp:
-                r, c = kp
+        if self._status in ("check", "checkmate"):
+            ksq = board.king(board.turn)
+            if ksq is not None:
+                kc = chess.square_file(ksq)
+                kr = 7 - chess.square_rank(ksq)
                 pygame.draw.rect(self.screen, C["check_sq"],
-                                 (BX + c * SQ, BY + r * SQ, SQ, SQ))
+                                 (BX + kc * SQ, BY + kr * SQ, SQ, SQ))
 
-        # Valid-move indicators
-        for r, c in self.valid:
+        for sq in self.valid_sqs:
+            c   = chess.square_file(sq)
+            r   = 7 - chess.square_rank(sq)
             cx_ = BX + c * SQ + SQ // 2
             cy_ = BY + r * SQ + SQ // 2
-            if g.board[r][c]:
+            if board.piece_at(sq):
                 pygame.draw.circle(self.screen, C["sel"], (cx_, cy_), SQ // 2 - 3, 4)
             else:
                 pygame.draw.circle(self.screen, C["sel"], (cx_, cy_), 9)
 
-        # Pieces (shadow + fill)
         for r in range(8):
             for c in range(8):
-                p = g.board[r][c]
+                p = board.piece_at(chess.square(c, 7 - r))
                 if not p:
                     continue
                 cx_ = BX + c * SQ + SQ // 2
                 cy_ = BY + r * SQ + SQ // 2
-                fill = (255, 255, 255) if p[0] == 'w' else (17,  17,  17)
-                shd  = (68,  68,  68)  if p[0] == 'w' else (153, 153, 153)
+                fill = (255, 255, 255) if p.color == chess.WHITE else (17,  17,  17)
+                shd  = (68,  68,  68)  if p.color == chess.WHITE else (153, 153, 153)
+                sym  = SYMS[(p.color, p.piece_type)]
                 for dx, dy, col in ((1, 2, shd), (0, 0, fill)):
-                    s = self.pf.render(SYMS[p], True, col)
+                    s = self.pf.render(sym, True, col)
                     self.screen.blit(s, s.get_rect(center=(cx_ + dx, cy_ + dy)))
 
-        # Coordinate labels (inside squares)
         for c, ltr in enumerate("abcdefgh"):
             col = C["light"] if c % 2 == 0 else C["dark"]
             s   = self.lf.render(ltr, True, col)
@@ -484,34 +516,44 @@ class App:
         pygame.draw.rect(self.screen, C["sidebar"],
                          (SBX, BY, SBW, SQ * 8), border_radius=12)
         cx = SBX + SBW // 2
-        g  = self.game
 
         t = self.ub.render("Xadrez", True, C["fg"])
         self.screen.blit(t, t.get_rect(center=(cx, BY + 28)))
 
-        # Turn: symbol + name side by side
-        sym_s  = self.sf.render("♔" if g.turn == 'w' else "♚", True, C["fg"])
-        name_s = self.uf.render("Brancas" if g.turn == 'w' else "Pretas", True, C["fg"])
+        turn   = self.board.turn
+        sym_s  = self.sf.render("♔" if turn == chess.WHITE else "♚", True, C["fg"])
+        name_s = self.uf.render("Brancas" if turn == chess.WHITE else "Pretas", True, C["fg"])
         total  = sym_s.get_width() + 6 + name_s.get_width()
         bx     = cx - total // 2
-        mid    = BY + 60
+        mid    = BY + 58
         self.screen.blit(sym_s,  (bx, mid - sym_s.get_height() // 2))
         self.screen.blit(name_s, (bx + sym_s.get_width() + 6,
                                   mid - name_s.get_height() // 2))
 
-        # Status
+        if self.mode == "cpu":
+            diff_lbl = {"easy": "Facil", "medium": "Medio", "hard": "Dificil"}
+            ts = self.lf.render(f"CPU  |  {diff_lbl[self.difficulty]}", True, C["hint"])
+            self.screen.blit(ts, ts.get_rect(center=(cx, BY + 78)))
+
+        y_st = BY + 96 if self.mode == "cpu" else BY + 80
         st_map = {
-            'check':     ("Xeque!",      C["red"]),
-            'checkmate': ("Xeque-mate!", C["red"]),
-            'stalemate': ("Empate",      C["hint"]),
+            "check":     ("Xeque!",      C["red"]),
+            "checkmate": ("Xeque-mate!", C["red"]),
+            "stalemate": ("Empate",      C["hint"]),
+            "draw":      ("Empate",      C["hint"]),
         }
         if self._status in st_map:
             txt, clr = st_map[self._status]
             s = self.ub.render(txt, True, clr)
-            self.screen.blit(s, s.get_rect(center=(cx, BY + 84)))
+            self.screen.blit(s, s.get_rect(center=(cx, y_st)))
 
-        self._btn(self._r_new(),  "⟳  Nova Partida", mouse, C["neu"], C["neu_hov"])
-        self._btn(self._r_menu(), "←  Menu",          mouse, C["neu"], C["neu_hov"])
+        if self._ai_thinking:
+            dots = "." * ((pygame.time.get_ticks() // 400) % 4)
+            ts = self.uf.render(f"CPU pensando{dots}", True, C["gold"])
+            self.screen.blit(ts, ts.get_rect(center=(cx, y_st + 22)))
+
+        self._btn(self._r("new"),      "Reiniciar", mouse, C["neu"], C["neu_hov"])
+        self._btn(self._r("menu_btn"), "< Menu",    mouse, C["neu"], C["neu_hov"])
 
     def _draw_promo(self, mouse):
         ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
@@ -519,35 +561,35 @@ class App:
         self.screen.blit(ov, (0, 0))
 
         rects = self._promo_rects()
-        bsz   = 82
-        gap   = 8
-        pw    = 4 * bsz + 3 * gap + 32
-        ph    = 148
-        px    = (WIN_W - pw) // 2
-        py    = (WIN_H - ph) // 2
-
+        bsz, gap = 82, 8
+        pw = 4 * bsz + 3 * gap + 32
+        ph = 148
+        px = (WIN_W - pw) // 2
+        py = (WIN_H - ph) // 2
         pygame.draw.rect(self.screen, C["sidebar"], (px, py, pw, ph), border_radius=12)
 
-        t = self.ub.render("Promover peão para:", True, C["fg"])
+        t = self.ub.render("Promover peao para:", True, C["fg"])
         self.screen.blit(t, t.get_rect(center=(px + pw // 2, py + 18)))
 
-        color  = self.game.board[self.promoting[0]][self.promoting[1]][0]
-        labels = {'Q': 'Dama', 'R': 'Torre', 'B': 'Bispo', 'N': 'Cavalo'}
+        p = self.board.piece_at(self._promo_from)
+        color = p.color if p else chess.WHITE
+        labels = {chess.QUEEN: "Dama", chess.ROOK: "Torre",
+                  chess.BISHOP: "Bispo", chess.KNIGHT: "Cavalo"}
         for pt, rect in rects.items():
             pygame.draw.rect(self.screen,
                              C["neu_hov"] if rect.collidepoint(mouse) else C["neu"],
                              rect, border_radius=8)
-            fill  = (255, 255, 255) if color == 'w' else (17, 17, 17)
+            fill  = (255, 255, 255) if color == chess.WHITE else (17, 17, 17)
             sym_s = self.pf.render(SYMS[(color, pt)], True, fill)
             self.screen.blit(sym_s, sym_s.get_rect(center=(rect.centerx, rect.centery - 8)))
-            lbl_s = self.lf.render(labels[pt], True, C["hint"])
-            self.screen.blit(lbl_s, lbl_s.get_rect(center=(rect.centerx, rect.bottom - 10)))
+            n_s = self.lf.render(labels[pt], True, C["hint"])
+            self.screen.blit(n_s, n_s.get_rect(center=(rect.centerx, rect.bottom - 10)))
 
-    def _btn(self, rect, text, mouse, bg, bg_hov, bold=False, radius=8):
+    def _btn(self, rect, text, mouse, bg, bg_hov, radius=8):
         pygame.draw.rect(self.screen,
                          bg_hov if rect.collidepoint(mouse) else bg,
                          rect, border_radius=radius)
-        s = (self.ub if bold else self.uf).render(text, True, C["fg"])
+        s = self.uf.render(text, True, C["fg"])
         self.screen.blit(s, s.get_rect(center=rect.center))
 
 
