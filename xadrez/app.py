@@ -1,6 +1,7 @@
 import sys
 import random
 import threading
+import time
 
 import chess
 import pygame
@@ -368,7 +369,11 @@ class App:
         gen        = self._ai_gen
 
         def think():
+            t0   = time.monotonic()
             move = compute_ai_move(board_copy, diff)
+            remaining = 1.0 - (time.monotonic() - t0)
+            if remaining > 0:
+                time.sleep(remaining)
             if self._ai_gen == gen:
                 self._ai_move = move
             self._ai_thinking = False
