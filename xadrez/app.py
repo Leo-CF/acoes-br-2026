@@ -281,6 +281,9 @@ class App:
                             break
                 return
 
+            if click and self._r("undo").collidepoint(mouse):
+                self._undo()
+                return
             if click and self._r("new").collidepoint(mouse):
                 self._new_game()
                 return
@@ -361,6 +364,26 @@ class App:
         if self.board.is_check():                 return "check"
         return "playing"
 
+    def _undo(self):
+        if self._ai_thinking:
+            return
+        # CPU mode: need to undo the pair (player + CPU) to keep it the player's turn
+        if self.mode == "cpu":
+            if len(self.board.move_stack) < 2:
+                return
+            self.board.pop()
+            self.board.pop()
+        else:
+            if not self.board.move_stack:
+                return
+            self.board.pop()
+        self.sel_sq    = None
+        self.valid_sqs = []
+        self.promoting = self._promo_from = None
+        self._ai_move  = None
+        self._ai_gen  += 1   # discard any in-flight CPU move
+        self._status   = self._get_status()
+
     # ── AI ────────────────────────────────────────────────────────────────
     def _start_ai(self):
         self._ai_thinking = True
@@ -394,8 +417,9 @@ class App:
             "hard":     (cx - 110, WIN_H // 2 + 50, 220, 44),
             "back":     (cx - 110, WIN_H // 2 + 116, 220, 36),
             # game sidebar
-            "new":      (sb_cx - 70, BY + SQ * 8 - 96, 140, 36),
-            "menu_btn": (sb_cx - 70, BY + SQ * 8 - 52, 140, 36),
+            "undo":     (sb_cx - 70, BY + SQ * 8 - 140, 140, 36),
+            "new":      (sb_cx - 70, BY + SQ * 8 -  96, 140, 36),
+            "menu_btn": (sb_cx - 70, BY + SQ * 8 -  52, 140, 36),
         }
         return pygame.Rect(table[name])
 
@@ -557,8 +581,13 @@ class App:
             ts = self.uf.render(f"CPU pensando{dots}", True, C["gold"])
             self.screen.blit(ts, ts.get_rect(center=(cx, y_st + 22)))
 
-        self._btn(self._r("new"),      "Reiniciar", mouse, C["neu"], C["neu_hov"])
-        self._btn(self._r("menu_btn"), "< Menu",    mouse, C["neu"], C["neu_hov"])
+        min_moves = 2 if self.mode == "cpu" else 1
+        can_undo = len(self.board.move_stack) >= min_moves and not self._ai_thinking
+        self._btn(self._r("undo"),     "< Desfazer", mouse,
+                  C["neu"] if can_undo else (20, 22, 28),
+                  C["neu_hov"] if can_undo else (20, 22, 28))
+        self._btn(self._r("new"),      "Reiniciar",  mouse, C["neu"], C["neu_hov"])
+        self._btn(self._r("menu_btn"), "< Menu",     mouse, C["neu"], C["neu_hov"])
 
     def _draw_promo(self, mouse):
         ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
