@@ -488,7 +488,10 @@ class App:
             self._snd_move = self._snd_capture = self._snd_check = self._snd_gameover = None
 
     def _load_sprites(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if getattr(sys, "frozen", False):
+            root = sys._MEIPASS
+        else:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self._asset_packs = {}
         for name, loader in [("pixel", self._load_pixel_pack),
                               ("classic", self._load_classic_pack)]:
@@ -557,7 +560,11 @@ class App:
         threading.Thread(target=think, daemon=True).start()
 
     def _init_engine(self):
-        candidates = ["stockfish"]
+        candidates = []
+        if getattr(sys, "frozen", False):
+            for _sf in ("stockfish.exe", "stockfish-windows-x86-64-avx2.exe"):
+                candidates.append(os.path.join(sys._MEIPASS, _sf))
+        candidates.append("stockfish")
         for p in [
             r"C:\stockfish\stockfish-windows-x86-64-avx2.exe",
             r"C:\stockfish\stockfish-windows-x86-64.exe",

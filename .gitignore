@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 .streamlit/
+xadrez/build/
+xadrez/dist/
